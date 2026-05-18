@@ -195,6 +195,44 @@ test("静态入金生成2倍仓位，节点推荐静态奖励20%，并计入团�
   assert.equal(position.cap, parse("2000"));
 });
 
+test("第三阶段：创世、静态、金卡资格和团队业绩统计可查询", async () => {
+  await purchase.connect(alice).buyGenesis(ethers.ZeroAddress);
+  await purchase.connect(alice).buyGenesis(ethers.ZeroAddress);
+  await purchase.connect(bob).buyNode(await alice.getAddress());
+  await purchase.connect(carol).buyNode(await bob.getAddress());
+  await purchase.connect(dave).staticDeposit(parse("1000"), await bob.getAddress());
+
+  const alicePositions = await ledger.userPositionDetails(await alice.getAddress());
+  assert.equal(alicePositions.length, 2);
+  assert.equal(await genesisNft.balanceOf(await alice.getAddress()), 2n);
+
+  const aliceDirects = await purchase.directReferralsOf(await alice.getAddress());
+  const bobDirects = await purchase.directReferralsOf(await bob.getAddress());
+  assert.deepEqual(Array.from(aliceDirects), [await bob.getAddress()]);
+  assert.deepEqual(Array.from(bobDirects), [await carol.getAddress(), await dave.getAddress()]);
+
+  const aliceTeam = await purchase.teamSnapshot(await alice.getAddress());
+  assert.equal(aliceTeam.personalPerformance, parse("12000"));
+  assert.equal(aliceTeam.userPerformance, parse("1400"));
+  assert.equal(aliceTeam.areaPerformance, parse("13400"));
+  assert.equal(aliceTeam.directTotalPerformance, parse("1400"));
+  assert.equal(aliceTeam.directReferralCount, 1n);
+  assert.equal(aliceTeam.directNodeCount, 1n);
+
+  const bobTeam = await purchase.teamSnapshot(await bob.getAddress());
+  assert.equal(bobTeam.personalPerformance, parse("200"));
+  assert.equal(bobTeam.userPerformance, parse("1200"));
+  assert.equal(bobTeam.areaPerformance, parse("1400"));
+  assert.equal(bobTeam.directTotalPerformance, parse("1200"));
+  assert.equal(bobTeam.directReferralCount, 2n);
+  assert.equal(bobTeam.directNodeCount, 1n);
+
+  const bobSnapshot = await purchase.userSnapshot(await bob.getAddress());
+  assert.equal(bobSnapshot.eligibleGoldCards, 0n);
+  assert.equal(bobSnapshot.areaPerformance, parse("1400"));
+  assert.equal(bobSnapshot.directTotalPerformance, parse("1200"));
+});
+
 test("每30个直推有效节点NFT可铸造1张金卡，总量受限", async () => {
   await purchase.connect(alice).buyNode(ethers.ZeroAddress);
 
@@ -204,6 +242,9 @@ test("每30个直推有效节点NFT可铸造1张金卡，总量受限", async ()
   }
 
   assert.equal(await purchase.directNodeCount(await alice.getAddress()), 30n);
+  assert.equal(await purchase.eligibleGoldCards(await alice.getAddress()), 1n);
+  const snapshot = await purchase.userSnapshot(await alice.getAddress());
+  assert.equal(snapshot.eligibleGoldCards, 1n);
   await (await purchase.connect(alice).mintGoldCard()).wait();
   assert.equal(await goldCardNft.balanceOf(await alice.getAddress()), 1n);
 

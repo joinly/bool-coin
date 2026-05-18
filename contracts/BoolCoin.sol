@@ -510,6 +510,7 @@ contract PurchaseManager is Ownable {
     mapping(address => uint256) public goldMinted;
     mapping(address => uint256) public personalPerformance;
     mapping(address => uint256) public teamPerformance;
+    mapping(address => address[]) private directReferrals;
 
     event TreasurySet(address indexed treasury);
     event ReferrerBound(address indexed account, address indexed referrer);
@@ -524,13 +525,26 @@ contract PurchaseManager is Ownable {
         bool boughtNode;
         bool whitelistAvailable;
         bool whitelistUsed;
+        uint256 directReferralCount;
         uint256 directNodeCount;
         uint256 goldMinted;
+        uint256 eligibleGoldCards;
         uint256 personalPerformance;
         uint256 teamPerformance;
+        uint256 areaPerformance;
+        uint256 directTotalPerformance;
         uint256 genesisBalance;
         uint256 nodeBalance;
         uint256 goldCardBalance;
+    }
+
+    struct TeamSnapshot {
+        uint256 personalPerformance;
+        uint256 userPerformance;
+        uint256 areaPerformance;
+        uint256 directTotalPerformance;
+        uint256 directReferralCount;
+        uint256 directNodeCount;
     }
 
     constructor(
@@ -635,7 +649,7 @@ contract PurchaseManager is Ownable {
     }
 
     function mintGoldCard() external {
-        uint256 eligible = directNodeCount[msg.sender] / 30;
+        uint256 eligible = eligibleGoldCards(msg.sender);
         require(goldMinted[msg.sender] < eligible, "no quota");
         require(goldCardNft.totalSupply() < goldCardNft.maxSupply(), "gold sold out");
 
@@ -650,13 +664,47 @@ contract PurchaseManager is Ownable {
             boughtNode: boughtNode[account],
             whitelistAvailable: whitelistAvailable[account],
             whitelistUsed: whitelistUsed[account],
+            directReferralCount: directReferrals[account].length,
             directNodeCount: directNodeCount[account],
             goldMinted: goldMinted[account],
+            eligibleGoldCards: eligibleGoldCards(account),
             personalPerformance: personalPerformance[account],
             teamPerformance: teamPerformance[account],
+            areaPerformance: areaPerformance(account),
+            directTotalPerformance: directTotalPerformance(account),
             genesisBalance: genesisNft.balanceOf(account),
             nodeBalance: nodeNft.balanceOf(account),
             goldCardBalance: goldCardNft.balanceOf(account)
+        });
+    }
+
+    function directReferralsOf(address account) external view returns (address[] memory) {
+        return directReferrals[account];
+    }
+
+    function eligibleGoldCards(address account) public view returns (uint256) {
+        return directNodeCount[account] / 30;
+    }
+
+    function areaPerformance(address account) public view returns (uint256) {
+        return personalPerformance[account] + teamPerformance[account];
+    }
+
+    function directTotalPerformance(address account) public view returns (uint256 total) {
+        address[] storage referrals = directReferrals[account];
+        for (uint256 i = 0; i < referrals.length; i++) {
+            total += areaPerformance(referrals[i]);
+        }
+    }
+
+    function teamSnapshot(address account) external view returns (TeamSnapshot memory snapshot) {
+        snapshot = TeamSnapshot({
+            personalPerformance: personalPerformance[account],
+            userPerformance: teamPerformance[account],
+            areaPerformance: areaPerformance(account),
+            directTotalPerformance: directTotalPerformance(account),
+            directReferralCount: directReferrals[account].length,
+            directNodeCount: directNodeCount[account]
         });
     }
 
@@ -665,6 +713,7 @@ contract PurchaseManager is Ownable {
             return;
         }
         referrerOf[account] = referrer;
+        directReferrals[referrer].push(account);
         emit ReferrerBound(account, referrer);
     }
 
