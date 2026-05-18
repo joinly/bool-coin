@@ -224,11 +224,13 @@ contract PositionLedger is Ownable {
     }
 
     uint256 public nextPositionId = 1;
+    RewardVault public rewardVault;
     mapping(uint256 => Position) public positions;
     mapping(address => uint256[]) private userPositionIds;
     mapping(address => bool) public authorized;
 
     event AuthorizedSet(address indexed account, bool allowed);
+    event RewardVaultSet(address indexed vault);
     event PositionOpened(
         uint256 indexed positionId,
         address indexed account,
@@ -238,6 +240,12 @@ contract PositionLedger is Ownable {
         uint256 cap
     );
     event PositionReleased(uint256 indexed positionId, uint256 amount, uint256 released, bool closed);
+    event PositionRewardCredited(
+        uint256 indexed positionId,
+        address indexed account,
+        uint8 indexed rewardType,
+        uint256 amount
+    );
 
     modifier onlyAuthorized() {
         require(msg.sender == owner || authorized[msg.sender], "not authorized");
@@ -247,6 +255,12 @@ contract PositionLedger is Ownable {
     function setAuthorized(address account, bool allowed) external onlyOwner {
         authorized[account] = allowed;
         emit AuthorizedSet(account, allowed);
+    }
+
+    function setRewardVault(RewardVault vault_) external onlyOwner {
+        require(address(vault_) != address(0), "zero vault");
+        rewardVault = vault_;
+        emit RewardVaultSet(address(vault_));
     }
 
     function openPosition(
@@ -269,6 +283,21 @@ contract PositionLedger is Ownable {
     }
 
     function accrue(uint256 positionId, uint256 amount) external onlyAuthorized returns (uint256 credited) {
+        credited = _accrue(positionId, amount);
+    }
+
+    function releaseToVault(
+        uint256 positionId,
+        uint256 amount,
+        uint8 rewardType
+    ) external onlyAuthorized returns (uint256 credited) {
+        require(address(rewardVault) != address(0), "vault unset");
+        credited = _accrue(positionId, amount);
+        rewardVault.credit(positions[positionId].account, rewardType, credited);
+        emit PositionRewardCredited(positionId, positions[positionId].account, rewardType, credited);
+    }
+
+    function _accrue(uint256 positionId, uint256 amount) internal returns (uint256 credited) {
         Position storage position = positions[positionId];
         require(position.account != address(0), "bad position");
         require(!position.closed, "closed");
@@ -286,6 +315,14 @@ contract PositionLedger is Ownable {
 
     function userPositions(address account) external view returns (uint256[] memory) {
         return userPositionIds[account];
+    }
+
+    function userPositionDetails(address account) external view returns (Position[] memory details) {
+        uint256[] storage ids = userPositionIds[account];
+        details = new Position[](ids.length);
+        for (uint256 i = 0; i < ids.length; i++) {
+            details[i] = positions[ids[i]];
+        }
     }
 }
 
@@ -482,6 +519,20 @@ contract PurchaseManager is Ownable {
     event WhitelistBoolBought(address indexed account, uint256 amount);
     event GoldCardMinted(address indexed account, uint256 indexed tokenId);
 
+    struct UserSnapshot {
+        address referrer;
+        bool boughtNode;
+        bool whitelistAvailable;
+        bool whitelistUsed;
+        uint256 directNodeCount;
+        uint256 goldMinted;
+        uint256 personalPerformance;
+        uint256 teamPerformance;
+        uint256 genesisBalance;
+        uint256 nodeBalance;
+        uint256 goldCardBalance;
+    }
+
     constructor(
         IERC20 usdt_,
         BOOLToken boolToken_,
@@ -591,6 +642,22 @@ contract PurchaseManager is Ownable {
         goldMinted[msg.sender] += 1;
         uint256 tokenId = goldCardNft.mint(msg.sender);
         emit GoldCardMinted(msg.sender, tokenId);
+    }
+
+    function userSnapshot(address account) external view returns (UserSnapshot memory snapshot) {
+        snapshot = UserSnapshot({
+            referrer: referrerOf[account],
+            boughtNode: boughtNode[account],
+            whitelistAvailable: whitelistAvailable[account],
+            whitelistUsed: whitelistUsed[account],
+            directNodeCount: directNodeCount[account],
+            goldMinted: goldMinted[account],
+            personalPerformance: personalPerformance[account],
+            teamPerformance: teamPerformance[account],
+            genesisBalance: genesisNft.balanceOf(account),
+            nodeBalance: nodeNft.balanceOf(account),
+            goldCardBalance: goldCardNft.balanceOf(account)
+        });
     }
 
     function _bindReferrer(address account, address referrer) internal {

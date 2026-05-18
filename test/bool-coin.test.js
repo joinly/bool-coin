@@ -58,6 +58,11 @@ async function deploy(name, signer, args = []) {
   return instance;
 }
 
+async function mined(txPromise) {
+  const tx = await txPromise;
+  await tx.wait();
+}
+
 async function setup() {
   provider = new ethers.BrowserProvider(
     ganache.provider({
@@ -92,7 +97,9 @@ async function setup() {
   await nodeNft.connect(owner).setMinter(await purchase.getAddress(), true);
   await goldCardNft.connect(owner).setMinter(await purchase.getAddress(), true);
   await ledger.connect(owner).setAuthorized(await purchase.getAddress(), true);
+  await ledger.connect(owner).setRewardVault(await vault.getAddress());
   await vault.connect(owner).setAuthorized(await purchase.getAddress(), true);
+  await vault.connect(owner).setAuthorized(await ledger.getAddress(), true);
   await vault.connect(owner).setAuthorized(await rewardPool.getAddress(), true);
   await boolToken.connect(owner).setPriceKeeper(await priceKeeper.getAddress());
   await boolToken.connect(owner).setOpenPriceDay(1);
@@ -124,6 +131,34 @@ test("节点购买生成NFT、3倍仓位和100U一次性白名单额度", async 
   assert.equal(await boolToken.balanceOf(await alice.getAddress()), parse("100"));
 
   await assert.rejects(purchase.connect(alice).whitelistBuyBool(parse("1")));
+});
+
+test("第二阶段最小闭环：节点购买、3倍仓位、收益入账、用户领取、前台查询", async () => {
+  await purchase.connect(alice).buyNode(ethers.ZeroAddress);
+  const positions = await ledger.userPositions(await alice.getAddress());
+  const positionId = positions[0];
+
+  await usdt.connect(owner).mint(await vault.getAddress(), parse("600"));
+  await ledger.connect(owner).releaseToVault(positionId, parse("250"), 2);
+  await ledger.connect(owner).releaseToVault(positionId, parse("500"), 2);
+
+  const details = await ledger.userPositionDetails(await alice.getAddress());
+  assert.equal(details.length, 1);
+  assert.equal(details[0].released, parse("600"));
+  assert.equal(details[0].closed, true);
+  assert.equal(await vault.pendingRewards(await alice.getAddress(), 2), parse("600"));
+
+  const snapshot = await purchase.userSnapshot(await alice.getAddress());
+  assert.equal(snapshot.boughtNode, true);
+  assert.equal(snapshot.whitelistAvailable, true);
+  assert.equal(snapshot.nodeBalance, 1n);
+
+  const before = await usdt.balanceOf(await alice.getAddress());
+  await vault.connect(alice).claim(2);
+  const after = await usdt.balanceOf(await alice.getAddress());
+  assert.equal(after - before, parse("600"));
+
+  await assert.rejects(ledger.connect(owner).releaseToVault(positionId, parse("1"), 2));
 });
 
 test("创世推荐节点奖励35%，节点推荐节点奖励20%，均进入待领取USDT", async () => {
@@ -180,35 +215,38 @@ test("每30个直推有效节点NFT可铸造1张金卡，总量受限", async ()
 
 test("BOOL买税、跌幅卖税和盈利税按加权均价计算", async () => {
   const pair = await dave.getAddress();
-  await boolToken.connect(owner).setAmmPair(pair, true);
-  await boolToken.connect(owner).transfer(pair, parse("10000"));
-  await priceKeeper.connect(owner).setDailyOpenPrice(1, parse("1"));
+  await mined(boolToken.connect(owner).setAmmPair(pair, true));
+  await mined(boolToken.connect(owner).transfer(pair, parse("10000")));
+  await mined(priceKeeper.connect(owner).setDailyOpenPrice(1, parse("1")));
 
-  await priceKeeper.connect(owner).setCurrentPrice(parse("1"));
-  await boolToken.connect(dave).transfer(await alice.getAddress(), parse("1000"));
+  await mined(priceKeeper.connect(owner).setCurrentPrice(parse("1")));
+  await mined(boolToken.connect(dave).transfer(await alice.getAddress(), parse("1000")));
   assert.equal(await boolToken.balanceOf(await alice.getAddress()), parse("950"));
 
-  await priceKeeper.connect(owner).setCurrentPrice(parse("2"));
-  await boolToken.connect(dave).transfer(await alice.getAddress(), parse("1000"));
+  await mined(priceKeeper.connect(owner).setCurrentPrice(parse("2")));
+  await mined(boolToken.connect(dave).transfer(await alice.getAddress(), parse("1000")));
   assert.equal(await boolToken.balanceOf(await alice.getAddress()), parse("1900"));
   assert.equal(await boolToken.trackedBoolBalance(await alice.getAddress()), parse("1900"));
   assert.equal(await boolToken.trackedUsdtCost(await alice.getAddress()), parse("2850"));
 
-  await priceKeeper.connect(owner).setCurrentPrice(parse("0.89"));
+  await mined(priceKeeper.connect(owner).setCurrentPrice(parse("0.89")));
   assert.equal(await boolToken.currentSellTaxBps(), 1500n);
 
   const taxBefore = await usdt.balanceOf(await treasury.getAddress());
-  await boolToken.connect(alice).transfer(pair, parse("100"));
+  await mined(boolToken.connect(alice).transfer(pair, parse("100")));
   const taxAfter = await usdt.balanceOf(await treasury.getAddress());
 
   // 成本均价为1.5U，0.89U卖出无盈利税，只收15% BOOL卖税。
   assert.equal(taxAfter - taxBefore, 0n);
   assert.equal(await boolToken.balanceOf(pair), parse("8085"));
 
-  await priceKeeper.connect(owner).setCurrentPrice(parse("3"));
-  await boolToken.connect(alice).transfer(pair, parse("100"));
+  await mined(priceKeeper.connect(owner).setCurrentPrice(parse("3")));
+  await mined(usdt.connect(alice).approve(await boolToken.getAddress(), ethers.MaxUint256));
+  const profitTaxBefore = await usdt.balanceOf(await treasury.getAddress());
+  await mined(boolToken.connect(alice).transfer(pair, parse("100")));
   const profitTaxAfter = await usdt.balanceOf(await treasury.getAddress());
-  assert(profitTaxAfter > taxAfter);
+  assert.equal(profitTaxBefore, taxAfter);
+  assert.equal(profitTaxAfter - profitTaxBefore, parse("37.5"));
 });
 
 test("内部奖励池每小时通缩0.25%，按20/25/50/5分配", async () => {
