@@ -780,24 +780,57 @@ contract PurchaseManager is Ownable {
 contract RewardPool is Ownable {
     uint256 public constant BPS = 10_000;
     uint256 public constant HOURLY_DEFLATION_BPS = 25;
+    uint256 public constant REWARD_PRECISION = 1e18;
     uint8 public constant CATEGORY_GENESIS = 2;
     uint8 public constant CATEGORY_LP = 3;
     uint8 public constant CATEGORY_GOLD = 4;
 
     RewardVault public immutable vault;
+    ProjectNFT public genesisNft;
+    ProjectNFT public goldCardNft;
     uint256 public internalBoolPool;
     uint256 public lastDeflationAt;
     uint256 public burnedBool;
     uint256 public genesisUsdtAccrued;
     uint256 public lpUsdtAccrued;
     uint256 public goldUsdtAccrued;
+    uint256 public totalLpStake;
+    uint256 public accGenesisUsdtPerNft;
+    uint256 public accLpUsdtPerShare;
+    uint256 public accGoldUsdtPerNft;
+
+    mapping(address => uint256) public lpStakeOf;
+    mapping(address => uint256) public genesisRewardDebt;
+    mapping(address => uint256) public lpRewardDebt;
+    mapping(address => uint256) public goldRewardDebt;
 
     event InternalBoolAdded(uint256 amount);
     event HourlyDeflationExecuted(uint256 boolAmount, uint256 usdtValue);
     event CategoryRewardCredited(address indexed account, uint8 indexed rewardType, uint256 amount);
+    event NftContractsSet(address indexed genesisNft, address indexed goldCardNft);
+    event LpStakeSet(address indexed account, uint256 amount);
 
     constructor(RewardVault vault_) {
         vault = vault_;
+    }
+
+    function setNftContracts(ProjectNFT genesisNft_, ProjectNFT goldCardNft_) external onlyOwner {
+        require(address(genesisNft_) != address(0) && address(goldCardNft_) != address(0), "zero nft");
+        genesisNft = genesisNft_;
+        goldCardNft = goldCardNft_;
+        emit NftContractsSet(address(genesisNft_), address(goldCardNft_));
+    }
+
+    function setLpStake(address account, uint256 amount) external onlyOwner {
+        require(account != address(0), "zero account");
+        _claimLpReward(account);
+
+        uint256 current = lpStakeOf[account];
+        totalLpStake = totalLpStake + amount - current;
+        lpStakeOf[account] = amount;
+        lpRewardDebt[account] = (amount * accLpUsdtPerShare) / REWARD_PRECISION;
+
+        emit LpStakeSet(account, amount);
     }
 
     function addInternalBool(uint256 amount) external onlyOwner {
@@ -816,10 +849,24 @@ contract RewardPool is Ownable {
         internalBoolPool -= boolAmount;
         uint256 usdtValue = (boolAmount * priceUsdtPerBool) / 1 ether;
 
-        genesisUsdtAccrued += (usdtValue * 2_000) / BPS;
+        uint256 genesisAmount = (usdtValue * 2_000) / BPS;
+        uint256 lpAmount = (usdtValue * 5_000) / BPS;
+        uint256 goldAmount = (usdtValue * 500) / BPS;
+
+        genesisUsdtAccrued += genesisAmount;
         burnedBool += (boolAmount * 2_500) / BPS;
-        lpUsdtAccrued += (usdtValue * 5_000) / BPS;
-        goldUsdtAccrued += (usdtValue * 500) / BPS;
+        lpUsdtAccrued += lpAmount;
+        goldUsdtAccrued += goldAmount;
+
+        if (address(genesisNft) != address(0) && genesisNft.totalSupply() > 0) {
+            accGenesisUsdtPerNft += (genesisAmount * REWARD_PRECISION) / genesisNft.totalSupply();
+        }
+        if (totalLpStake > 0) {
+            accLpUsdtPerShare += (lpAmount * REWARD_PRECISION) / totalLpStake;
+        }
+        if (address(goldCardNft) != address(0) && goldCardNft.totalSupply() > 0) {
+            accGoldUsdtPerNft += (goldAmount * REWARD_PRECISION) / goldCardNft.totalSupply();
+        }
 
         emit HourlyDeflationExecuted(boolAmount, usdtValue);
     }
@@ -841,5 +888,69 @@ contract RewardPool is Ownable {
         }
         vault.credit(account, rewardType, amount);
         emit CategoryRewardCredited(account, rewardType, amount);
+    }
+
+    function pendingGenesisReward(address account) public view returns (uint256) {
+        if (address(genesisNft) == address(0)) {
+            return 0;
+        }
+        uint256 accumulated = (genesisNft.balanceOf(account) * accGenesisUsdtPerNft) / REWARD_PRECISION;
+        uint256 debt = genesisRewardDebt[account];
+        return accumulated > debt ? accumulated - debt : 0;
+    }
+
+    function pendingLpReward(address account) public view returns (uint256) {
+        uint256 accumulated = (lpStakeOf[account] * accLpUsdtPerShare) / REWARD_PRECISION;
+        uint256 debt = lpRewardDebt[account];
+        return accumulated > debt ? accumulated - debt : 0;
+    }
+
+    function pendingGoldReward(address account) public view returns (uint256) {
+        if (address(goldCardNft) == address(0)) {
+            return 0;
+        }
+        uint256 accumulated = (goldCardNft.balanceOf(account) * accGoldUsdtPerNft) / REWARD_PRECISION;
+        uint256 debt = goldRewardDebt[account];
+        return accumulated > debt ? accumulated - debt : 0;
+    }
+
+    function claimGenesisReward() external {
+        uint256 amount = pendingGenesisReward(msg.sender);
+        require(amount > 0, "nothing to claim");
+        require(genesisUsdtAccrued >= amount, "not enough genesis");
+        genesisUsdtAccrued -= amount;
+        genesisRewardDebt[msg.sender] =
+            (genesisNft.balanceOf(msg.sender) * accGenesisUsdtPerNft) /
+            REWARD_PRECISION;
+        vault.credit(msg.sender, CATEGORY_GENESIS, amount);
+        emit CategoryRewardCredited(msg.sender, CATEGORY_GENESIS, amount);
+    }
+
+    function claimLpReward() external {
+        _claimLpReward(msg.sender);
+    }
+
+    function claimGoldReward() external {
+        uint256 amount = pendingGoldReward(msg.sender);
+        require(amount > 0, "nothing to claim");
+        require(goldUsdtAccrued >= amount, "not enough gold");
+        goldUsdtAccrued -= amount;
+        goldRewardDebt[msg.sender] =
+            (goldCardNft.balanceOf(msg.sender) * accGoldUsdtPerNft) /
+            REWARD_PRECISION;
+        vault.credit(msg.sender, CATEGORY_GOLD, amount);
+        emit CategoryRewardCredited(msg.sender, CATEGORY_GOLD, amount);
+    }
+
+    function _claimLpReward(address account) internal {
+        uint256 amount = pendingLpReward(account);
+        if (amount == 0) {
+            return;
+        }
+        require(lpUsdtAccrued >= amount, "not enough lp");
+        lpUsdtAccrued -= amount;
+        lpRewardDebt[account] = (lpStakeOf[account] * accLpUsdtPerShare) / REWARD_PRECISION;
+        vault.credit(account, CATEGORY_LP, amount);
+        emit CategoryRewardCredited(account, CATEGORY_LP, amount);
     }
 }

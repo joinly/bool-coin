@@ -92,6 +92,7 @@ async function setup() {
     await treasury.getAddress()
   ]);
   rewardPool = await deploy("RewardPool", owner, [await vault.getAddress()]);
+  await rewardPool.connect(owner).setNftContracts(await genesisNft.getAddress(), await goldCardNft.getAddress());
 
   await genesisNft.connect(owner).setMinter(await purchase.getAddress(), true);
   await nodeNft.connect(owner).setMinter(await purchase.getAddress(), true);
@@ -312,4 +313,40 @@ test("内部奖励池每小时通缩0.25%，按20/25/50/5分配", async () => {
   await rewardPool.connect(owner).creditCategoryReward(await alice.getAddress(), 3, parse("5"));
   await vault.connect(alice).claim(3);
   assert.equal(await usdt.balanceOf(await alice.getAddress()), parse("1000005"));
+});
+
+test("第五阶段：通缩池收益按创世、LP和金卡份额进入待领取余额", async () => {
+  await purchase.connect(alice).buyGenesis(ethers.ZeroAddress);
+  await purchase.connect(alice).buyGenesis(ethers.ZeroAddress);
+  await purchase.connect(bob).buyGenesis(ethers.ZeroAddress);
+  await goldCardNft.connect(owner).mint(await alice.getAddress());
+  await goldCardNft.connect(owner).mint(await bob.getAddress());
+  await rewardPool.connect(owner).setLpStake(await alice.getAddress(), parse("300"));
+  await rewardPool.connect(owner).setLpStake(await bob.getAddress(), parse("100"));
+
+  await rewardPool.connect(owner).addInternalBool(parse("10000"));
+  await rewardPool.connect(owner).executeHourlyDeflation(parse("2"));
+
+  assert.equal(await rewardPool.pendingGenesisReward(await alice.getAddress()), parse("6.666666666666666666"));
+  assert.equal(await rewardPool.pendingGenesisReward(await bob.getAddress()), parse("3.333333333333333333"));
+  assert.equal(await rewardPool.pendingLpReward(await alice.getAddress()), parse("18.75"));
+  assert.equal(await rewardPool.pendingLpReward(await bob.getAddress()), parse("6.25"));
+  assert.equal(await rewardPool.pendingGoldReward(await alice.getAddress()), parse("1.25"));
+  assert.equal(await rewardPool.pendingGoldReward(await bob.getAddress()), parse("1.25"));
+
+  await usdt.connect(owner).mint(await vault.getAddress(), parse("100"));
+  await rewardPool.connect(alice).claimGenesisReward();
+  await rewardPool.connect(alice).claimLpReward();
+  await rewardPool.connect(alice).claimGoldReward();
+
+  assert.equal(await vault.pendingRewards(await alice.getAddress(), 2), parse("6.666666666666666666"));
+  assert.equal(await vault.pendingRewards(await alice.getAddress(), 3), parse("18.75"));
+  assert.equal(await vault.pendingRewards(await alice.getAddress(), 4), parse("1.25"));
+
+  const before = await usdt.balanceOf(await alice.getAddress());
+  await vault.connect(alice).claim(2);
+  await vault.connect(alice).claim(3);
+  await vault.connect(alice).claim(4);
+  const after = await usdt.balanceOf(await alice.getAddress());
+  assert.equal(after - before, parse("26.666666666666666666"));
 });
