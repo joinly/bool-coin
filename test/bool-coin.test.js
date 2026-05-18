@@ -103,6 +103,7 @@ async function setup() {
   await vault.connect(owner).setAuthorized(await rewardPool.getAddress(), true);
   await boolToken.connect(owner).setPriceKeeper(await priceKeeper.getAddress());
   await boolToken.connect(owner).setOpenPriceDay(1);
+  await boolToken.connect(owner).setCostManager(await purchase.getAddress(), true);
   await boolToken.connect(owner).transfer(await purchase.getAddress(), parse("1000000"));
 
   for (const account of accounts.slice(2)) {
@@ -129,6 +130,8 @@ test("节点购买生成NFT、3倍仓位和100U一次性白名单额度", async 
   await purchase.connect(alice).whitelistBuyBool(parse("100"));
   assert.equal(await purchase.whitelistUsed(await alice.getAddress()), true);
   assert.equal(await boolToken.balanceOf(await alice.getAddress()), parse("100"));
+  assert.equal(await boolToken.trackedBoolBalance(await alice.getAddress()), parse("100"));
+  assert.equal(await boolToken.trackedUsdtCost(await alice.getAddress()), parse("100"));
 
   await assert.rejects(purchase.connect(alice).whitelistBuyBool(parse("1")));
 });
@@ -269,6 +272,7 @@ test("BOOL买税、跌幅卖税和盈利税按加权均价计算", async () => {
   assert.equal(await boolToken.balanceOf(await alice.getAddress()), parse("1900"));
   assert.equal(await boolToken.trackedBoolBalance(await alice.getAddress()), parse("1900"));
   assert.equal(await boolToken.trackedUsdtCost(await alice.getAddress()), parse("2850"));
+  assert.equal(await boolToken.buyTaxBoolAccrued(), parse("100"));
 
   await mined(priceKeeper.connect(owner).setCurrentPrice(parse("0.89")));
   assert.equal(await boolToken.currentSellTaxBps(), 1500n);
@@ -280,6 +284,7 @@ test("BOOL买税、跌幅卖税和盈利税按加权均价计算", async () => {
   // 成本均价为1.5U，0.89U卖出无盈利税，只收15% BOOL卖税。
   assert.equal(taxAfter - taxBefore, 0n);
   assert.equal(await boolToken.balanceOf(pair), parse("8085"));
+  assert.equal(await boolToken.sellTaxBoolAccrued(), parse("15"));
 
   await mined(priceKeeper.connect(owner).setCurrentPrice(parse("3")));
   await mined(usdt.connect(alice).approve(await boolToken.getAddress(), ethers.MaxUint256));
@@ -288,6 +293,9 @@ test("BOOL买税、跌幅卖税和盈利税按加权均价计算", async () => {
   const profitTaxAfter = await usdt.balanceOf(await treasury.getAddress());
   assert.equal(profitTaxBefore, taxAfter);
   assert.equal(profitTaxAfter - profitTaxBefore, parse("37.5"));
+  assert.equal(await boolToken.sellTaxBoolAccrued(), parse("20"));
+  assert.equal(await boolToken.profitLpUsdtAccrued(), parse("30"));
+  assert.equal(await boolToken.profitCommunityUsdtAccrued(), parse("7.5"));
 });
 
 test("内部奖励池每小时通缩0.25%，按20/25/50/5分配", async () => {

@@ -337,19 +337,26 @@ contract BOOLToken is ERC20, Ownable {
     PriceKeeper public priceKeeper;
     address public taxWallet;
     uint256 public openPriceDay;
+    uint256 public buyTaxBoolAccrued;
+    uint256 public sellTaxBoolAccrued;
+    uint256 public profitLpUsdtAccrued;
+    uint256 public profitCommunityUsdtAccrued;
 
     mapping(address => bool) public ammPairs;
     mapping(address => bool) public taxExempt;
+    mapping(address => bool) public costManagers;
     mapping(address => uint256) public trackedBoolBalance;
     mapping(address => uint256) public trackedUsdtCost;
 
     event AmmPairSet(address indexed pair, bool allowed);
     event TaxExemptSet(address indexed account, bool exempt);
+    event CostManagerSet(address indexed account, bool allowed);
     event TaxWalletSet(address indexed wallet);
     event PriceKeeperSet(address indexed keeper);
     event OpenPriceDaySet(uint256 day);
     event TradeTaxTaken(address indexed account, bool indexed isSell, uint256 taxBps, uint256 boolTax);
     event ProfitTaxTaken(address indexed account, uint256 soldBool, uint256 profitUsdt, uint256 taxUsdt);
+    event PurchaseCostRecorded(address indexed account, uint256 boolAmount, uint256 usdtCost);
 
     constructor(IERC20 usdt_, address taxWallet_) ERC20("BOOL", "BOOL", 18) {
         require(taxWallet_ != address(0), "zero wallet");
@@ -368,6 +375,11 @@ contract BOOLToken is ERC20, Ownable {
     function setTaxExempt(address account, bool exempt) external onlyOwner {
         taxExempt[account] = exempt;
         emit TaxExemptSet(account, exempt);
+    }
+
+    function setCostManager(address account, bool allowed) external onlyOwner {
+        costManagers[account] = allowed;
+        emit CostManagerSet(account, allowed);
     }
 
     function setTaxWallet(address wallet) external onlyOwner {
@@ -394,6 +406,15 @@ contract BOOLToken is ERC20, Ownable {
         return (trackedUsdtCost[account] * 1 ether) / balance;
     }
 
+    function recordPurchaseCost(address account, uint256 boolAmount, uint256 usdtCost) external {
+        require(msg.sender == owner || costManagers[msg.sender], "not cost manager");
+        require(account != address(0), "zero account");
+        require(boolAmount > 0 && usdtCost > 0, "zero cost");
+        trackedBoolBalance[account] += boolAmount;
+        trackedUsdtCost[account] += usdtCost;
+        emit PurchaseCostRecorded(account, boolAmount, usdtCost);
+    }
+
     function _transfer(address from, address to, uint256 amount) internal override {
         if (taxExempt[from] || taxExempt[to]) {
             super._transfer(from, to, amount);
@@ -403,6 +424,7 @@ contract BOOLToken is ERC20, Ownable {
         if (ammPairs[from]) {
             uint256 fee = (amount * BUY_TAX_BPS) / BPS;
             uint256 net = amount - fee;
+            buyTaxBoolAccrued += fee;
             super._transfer(from, taxWallet, fee);
             super._transfer(from, to, net);
             _increaseCost(to, net);
@@ -416,6 +438,7 @@ contract BOOLToken is ERC20, Ownable {
             uint256 net = amount - fee;
             _takeProfitTax(from, amount);
             _decreaseCost(from, amount);
+            sellTaxBoolAccrued += fee;
             super._transfer(from, taxWallet, fee);
             super._transfer(from, to, net);
             emit TradeTaxTaken(from, true, taxBps, fee);
@@ -482,6 +505,8 @@ contract BOOLToken is ERC20, Ownable {
         uint256 profit = proceeds - cost;
         uint256 tax = (profit * PROFIT_TAX_BPS) / BPS;
         require(usdt.transferFrom(account, taxWallet, tax), "profit tax failed");
+        profitLpUsdtAccrued += (profit * 2_000) / BPS;
+        profitCommunityUsdtAccrued += (profit * 500) / BPS;
         emit ProfitTaxTaken(account, boolAmount, profit, tax);
     }
 }
@@ -644,6 +669,7 @@ contract PurchaseManager is Ownable {
         whitelistUsed[msg.sender] = true;
         require(usdt.transferFrom(msg.sender, treasury, amount), "pay failed");
         require(boolToken.transfer(msg.sender, amount), "bool transfer failed");
+        boolToken.recordPurchaseCost(msg.sender, amount, amount);
 
         emit WhitelistBoolBought(msg.sender, amount);
     }
